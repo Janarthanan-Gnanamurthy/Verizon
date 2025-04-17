@@ -207,6 +207,8 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
 
+axios.defaults.baseURL = 'http://172.17.2.29:8000';
+
 const router = useRouter();
 const roomName = ref('');
 const hostName = ref('');
@@ -224,7 +226,7 @@ onMounted(() => {
 
 async function loadRooms() {
   try {
-    const response = await axios.get('/api/rooms/');
+    const response = await axios.get('/rooms/');
     rooms.value = response.data.rooms;
   } catch (error) {
     console.error('Failed to fetch rooms:', error);
@@ -236,7 +238,7 @@ async function createRoom() {
     // Save username to localStorage
     localStorage.setItem('username', hostName.value);
     
-    const response = await axios.post('/api/rooms/', {
+    const response = await axios.post('/rooms/', {
       name: roomName.value,
       host_id: hostName.value
     });

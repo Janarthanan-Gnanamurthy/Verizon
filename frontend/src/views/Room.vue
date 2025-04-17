@@ -304,6 +304,8 @@ import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 
+axios.defaults.baseURL = 'http://172.17.2.29:8000';
+
 // Router and route setup
 const route = useRoute();
 const router = useRouter();
@@ -360,7 +362,7 @@ watch(chatMessages, () => {
 onMounted(async () => {
   try {
     // Fetch room details
-    const response = await axios.get(`/api/rooms/${roomId.value}`);
+    const response = await axios.get(`/rooms/${roomId.value}`);
     if (response.data.error) {
       alert('Room not found');
       router.push('/');
@@ -476,7 +478,7 @@ async function setupMediaDevices() {
 // Connect to the WebSocket server for signaling
 function connectToWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = 'localhost:8000';
+  const host = '172.17.2.29:8000';
   websocket.value = new WebSocket(`${protocol}//${host}/ws/${roomId.value}`);
   
   websocket.value.onopen = () => {
@@ -713,18 +715,8 @@ function createPeerConnection(peerId) {
     if (localStream.value) {
       const localTracks = localStream.value.getTracks();
       console.log(`Adding ${localTracks.length} local tracks to connection with ${peerId}`);
-      
       localTracks.forEach(track => {
         try {
-          if (track.kind === 'audio' && isMuted.value) {
-            console.log(`Skipping muted audio track for ${peerId}`);
-            return;
-          }
-          if (track.kind === 'video' && isVideoOff.value) {
-            console.log(`Skipping disabled video track for ${peerId}`);
-            return;
-          }
-          
           pc.addTrack(track, localStream.value);
           console.log(`Added local ${track.kind} track to peer connection for ${peerId}`);
         } catch (error) {
@@ -785,12 +777,11 @@ function createPeerConnection(peerId) {
       
       // Make sure the peer exists in our list
       const peerIndex = peers.value.findIndex(p => p.id === peerId);
-      if (peerIndex === -1) {
-        console.log(`Adding peer ${peerId} to list when track received`);
-        peers.value.push({
-          id: peerId,
-          name: peerId,
-          videoEl: null
+      if (peerIndex !== -1 && peers.value[peerIndex].videoEl) {
+        peers.value[peerIndex].videoEl.srcObject = event.streams[0];
+        peers.value[peerIndex].videoEl.play().catch(() => {
+          peers.value[peerIndex].videoEl.muted = true;
+          peers.value[peerIndex].videoEl.play();
         });
       }
       
@@ -944,6 +935,11 @@ function toggleVideo() {
       track.enabled = isVideoOff.value;
     });
     isVideoOff.value = !isVideoOff.value;
+
+    // Renegotiate with all peers if video is toggled
+    Object.keys(peerConnections.value).forEach(peerId => {
+      createAndSendOffer(peerId, true);
+    });
   }
 }
 
@@ -1160,42 +1156,30 @@ function cleanupStalePeers() {
 // Update the ref handler for remote video elements
 function addVideoElement(peerId, element) {
   if (!element) return;
-  
-  console.log(`Setting video element reference for peer ${peerId}`);
+
   const peerIndex = peers.value.findIndex(p => p.id === peerId);
   if (peerIndex !== -1) {
     peers.value[peerIndex].videoEl = element;
-    
-    // Check if there's an existing connection with streams
+
+    // Try to get the remote stream from the peer connection
     const pc = peerConnections.value[peerId];
     if (pc) {
-      // Find all receivers with video tracks
-      const receivers = pc.getReceivers();
-      const streams = receivers
-        .filter(r => r.track && r.track.kind === 'video' && r.track.enabled)
-        .map(r => {
-          if (r.track.readyState === 'live') {
-            return r.streams && r.streams.length > 0 ? r.streams[0] : null;
-          }
-          return null;
-        })
-        .filter(s => s !== null);
-      
-      if (streams.length > 0) {
-        console.log(`Found existing stream for ${peerId}, attaching to element`);
-        element.srcObject = streams[0];
-        element.play().catch(e => {
-          console.warn(`Error playing video:`, e);
-          // Try with muted to bypass autoplay restrictions
+      // Collect all remote tracks and create a MediaStream
+      const remoteTracks = [];
+      pc.getReceivers().forEach(receiver => {
+        if (receiver.track && receiver.track.kind === "video") {
+          remoteTracks.push(receiver.track);
+        }
+      });
+      if (remoteTracks.length > 0) {
+        const remoteStream = new MediaStream(remoteTracks);
+        element.srcObject = remoteStream;
+        element.play().catch(() => {
           element.muted = true;
-          element.play().catch(err => console.error(`Still can't play:`, err));
+          element.play();
         });
-      } else {
-        console.log(`No valid video streams found for ${peerId}`);
       }
     }
-  } else {
-    console.warn(`Tried to set video element for unknown peer ${peerId}`);
   }
 }
 
