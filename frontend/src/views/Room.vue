@@ -57,10 +57,13 @@
               <!-- Remote Videos -->
               <div v-for="peer in peers" :key="peer.id" class="relative rounded-box bg-gradient-to-br from-base-300/70 to-base-300/30 backdrop-blur-sm shadow-lg overflow-hidden border border-base-content/10">
                 <video 
-                  :ref="el => { if(el) { peer.videoEl = el; } }" 
+                  :ref="el => addVideoElement(peer.id, el)" 
                   autoplay 
                   playsinline
                   class="w-full h-full object-cover"
+                  @loadedmetadata="console.log(`Video loaded for ${peer.id}`)"
+                  @playing="console.log(`Video playing for ${peer.id}`)"
+                  @error="e => console.error(`Video error for ${peer.id}:`, e)"
                 ></video>
                 <div class="absolute bottom-3 left-3 px-3 py-1.5 rounded-full bg-black/40 backdrop-blur-sm text-white flex items-center gap-2 text-sm">
                   <div class="w-2 h-2 rounded-full bg-info animate-pulse"></div>
@@ -377,6 +380,28 @@ onMounted(async () => {
     
     // Mark room as loaded
     roomLoaded.value = true;
+    
+    // Immediately clean up any potential stale peers
+    cleanupStalePeers();
+    
+    // Set up periodic refresh and cleanup
+    const videoRefreshInterval = setInterval(() => {
+      refreshVideoElements();
+    }, 5000);
+    
+    // Store the interval to clear it on unmount
+    onBeforeUnmount(() => {
+      // Clean up all peer connections
+      console.log('Cleaning up all peer connections');
+      Object.values(peerConnections.value).forEach(pc => {
+        if (pc) pc.close();
+      });
+      peerConnections.value = {};
+      peers.value = [];
+      
+      clearInterval(videoRefreshInterval);
+      console.log('Cleared video refresh interval');
+    });
   } catch (error) {
     console.error('Failed to initialize room:', error);
     alert('Failed to connect to the room');
@@ -456,7 +481,7 @@ function connectToWebSocket() {
   
   websocket.value.onopen = () => {
     console.log('Connected to WebSocket server');
-    // Send join message
+    // Send join message with clear username
     sendToServer({
       type: 'signal',
       user: username.value,
@@ -503,23 +528,41 @@ function handleWebSocketMessage(data) {
       break;
       
     case 'system':
-      // Check if the message is about a user leaving
-      if (data.content.includes('has left the room')) {
-        const leftUserId = data.content.split(' ')[0];
-        console.log(`User ${leftUserId} has left, cleaning up their connection`);
+      console.log('Received system message:', data.content);
+      
+      // Extract username from the system message
+      let affectedUser = '';
+      if (data.content.includes('has joined the room')) {
+        affectedUser = data.content.split(' ')[0];
+        console.log(`User ${affectedUser} has joined the room`);
+        
+        // Don't create a connection to ourselves
+        if (affectedUser !== username.value) {
+          console.log(`Creating connection with new user: ${affectedUser}`);
+          // Create peer connection if it doesn't exist
+          if (!peerConnections.value[affectedUser]) {
+            createPeerConnection(affectedUser);
+            // Send offer to the new user
+            createAndSendOffer(affectedUser);
+          }
+        }
+      } 
+      else if (data.content.includes('has left the room')) {
+        affectedUser = data.content.split(' ')[0];
+        console.log(`User ${affectedUser} has left, cleaning up their connection`);
         
         // Clean up their peer connection if it exists
-        if (peerConnections.value[leftUserId]) {
-          peerConnections.value[leftUserId].close();
-          delete peerConnections.value[leftUserId];
+        if (peerConnections.value[affectedUser]) {
+          peerConnections.value[affectedUser].close();
+          delete peerConnections.value[affectedUser];
           
           // Remove them from the peers list
-          const peerIndex = peers.value.findIndex(p => p.id === leftUserId);
+          const peerIndex = peers.value.findIndex(p => p.id === affectedUser);
           if (peerIndex !== -1) {
             peers.value.splice(peerIndex, 1);
           }
           
-          console.log(`Removed peer connection for ${leftUserId}`);
+          console.log(`Removed peer connection for ${affectedUser}`);
         }
       }
       
@@ -535,6 +578,23 @@ function handleWebSocketMessage(data) {
       // Process room participants info
       if (data.participants && data.participants.length > 0) {
         console.log('Room participants:', data.participants);
+        
+        // Clear peers list to avoid duplicates
+        peers.value = [];
+        
+        // Create connections with all existing participants in the room
+        data.participants.forEach(participantId => {
+          // Skip ourselves
+          if (participantId !== username.value) {
+            console.log(`Adding participant: ${participantId}`);
+            // Create peer connection if it doesn't exist
+            if (!peerConnections.value[participantId]) {
+              createPeerConnection(participantId);
+              // Send offer to this existing participant
+              createAndSendOffer(participantId);
+            }
+          }
+        });
       }
       break;
   }
@@ -544,55 +604,69 @@ function handleWebSocketMessage(data) {
 function handleSignalingData(data) {
   const { user, content } = data;
   
-  if (content.type === 'join' && user !== username.value) {
+  // Skip processing our own messages
+  if (user === username.value) return;
+  
+  console.log(`Received signal of type ${content.type} from ${user}`);
+  
+  if (content.type === 'join') {
+    console.log(`${user} joined with join signal, creating connection`);
     // New user joined, create peer connection
-    createPeerConnection(user);
-    
+    const pc = createPeerConnection(user);
     // Send offer to the new user
     createAndSendOffer(user);
-    
-    // Add system message
-    chatMessages.value.push({
-      user: 'System',
-      content: `${user} has joined the room`,
-      timestamp: Date.now()
-    });
   }
-  else if (content.type === 'offer' && user !== username.value) {
-    // Received an offer, create peer connection if not exists
+  else if (content.type === 'offer') {
+    console.log(`Processing offer from ${user}`);
+    // Get or create peer connection
     const pc = peerConnections.value[user] || createPeerConnection(user);
     
     // Set remote description and create answer
     pc.setRemoteDescription(new RTCSessionDescription(content.sdp))
-      .then(() => pc.createAnswer())
+      .then(() => {
+        console.log(`Set remote description from ${user}, creating answer`);
+        return pc.createAnswer();
+      })
       .then(answer => {
-        pc.setLocalDescription(answer);
+        console.log(`Setting local description (answer) for ${user}`);
+        return pc.setLocalDescription(answer);
+      })
+      .then(() => {
+        console.log(`Sending answer to ${user}`);
         sendToServer({
           type: 'signal',
           user: username.value,
           content: {
             type: 'answer',
             target: user,
-            sdp: answer
+            sdp: pc.localDescription
           }
         });
       })
-      .catch(error => console.error('Error handling offer:', error));
+      .catch(error => console.error(`Error handling offer from ${user}:`, error));
   }
   else if (content.type === 'answer' && content.target === username.value) {
-    // Received an answer to our offer
+    console.log(`Processing answer from ${user}`);
+    // Get peer connection
     const pc = peerConnections.value[user];
     if (pc) {
       pc.setRemoteDescription(new RTCSessionDescription(content.sdp))
-        .catch(error => console.error('Error setting remote description:', error));
+        .then(() => console.log(`Set remote description (answer) from ${user}`))
+        .catch(error => console.error(`Error setting remote description from ${user}:`, error));
+    } else {
+      console.warn(`Received answer from ${user} but no connection exists`);
     }
   }
   else if (content.type === 'ice-candidate' && content.target === username.value) {
-    // Received ICE candidate
+    console.log(`Processing ICE candidate from ${user}`);
+    // Get peer connection
     const pc = peerConnections.value[user];
     if (pc) {
       pc.addIceCandidate(new RTCIceCandidate(content.candidate))
-        .catch(error => console.error('Error adding ICE candidate:', error));
+        .then(() => console.log(`Added ICE candidate from ${user}`))
+        .catch(error => console.error(`Error adding ICE candidate from ${user}:`, error));
+    } else {
+      console.warn(`Received ICE candidate from ${user} but no connection exists`);
     }
   }
 }
@@ -617,126 +691,210 @@ function createPeerConnection(peerId) {
     ]
   };
   
-  // Create the connection
-  const pc = new RTCPeerConnection(configuration);
-  peerConnections.value[peerId] = pc;
-  
-  // Add peer to the list if not already there
-  const existingPeerIndex = peers.value.findIndex(p => p.id === peerId);
-  if (existingPeerIndex === -1) {
-    console.log(`Adding new peer ${peerId} to peers list`);
-    peers.value.push({
-      id: peerId,
-      name: peerId,
-      videoEl: null
-    });
-  } else {
-    console.log(`Peer ${peerId} already in list, reusing`);
-  }
-  
-  // Add local tracks to the connection
-  if (localStream.value) {
-    localStream.value.getTracks().forEach(track => {
-      pc.addTrack(track, localStream.value);
-      console.log(`Added local ${track.kind} track to peer connection for ${peerId}`);
-    });
-  } else {
-    console.warn('No local stream available when creating peer connection');
-  }
-  
-  // Handle ICE candidates
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      console.log(`Sending ICE candidate to ${peerId}`);
-      sendToServer({
-        type: 'signal',
-        user: username.value,
-        content: {
-          type: 'ice-candidate',
-          target: peerId,
-          candidate: event.candidate
+  try {
+    // Create the connection
+    const pc = new RTCPeerConnection(configuration);
+    peerConnections.value[peerId] = pc;
+    
+    // Add peer to the list if not already there
+    const existingPeerIndex = peers.value.findIndex(p => p.id === peerId);
+    if (existingPeerIndex === -1) {
+      console.log(`Adding new peer ${peerId} to peers list`);
+      peers.value.push({
+        id: peerId,
+        name: peerId,
+        videoEl: null
+      });
+    } else {
+      console.log(`Peer ${peerId} already in list, reusing`);
+    }
+    
+    // Add local tracks to the connection
+    if (localStream.value) {
+      const localTracks = localStream.value.getTracks();
+      console.log(`Adding ${localTracks.length} local tracks to connection with ${peerId}`);
+      
+      localTracks.forEach(track => {
+        try {
+          if (track.kind === 'audio' && isMuted.value) {
+            console.log(`Skipping muted audio track for ${peerId}`);
+            return;
+          }
+          if (track.kind === 'video' && isVideoOff.value) {
+            console.log(`Skipping disabled video track for ${peerId}`);
+            return;
+          }
+          
+          pc.addTrack(track, localStream.value);
+          console.log(`Added local ${track.kind} track to peer connection for ${peerId}`);
+        } catch (error) {
+          console.error(`Error adding track to connection with ${peerId}:`, error);
         }
       });
-    }
-  };
-  
-  // Handle ICE connection state changes
-  pc.oniceconnectionstatechange = () => {
-    console.log(`ICE connection state for ${peerId}: ${pc.iceConnectionState}`);
-    if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-      console.warn(`ICE connection with ${peerId} failed or disconnected. Attempting to restart.`);
-      // You could attempt to restart ICE here if needed
-    }
-  };
-  
-  // Handle incoming tracks with better error handling
-  pc.ontrack = (event) => {
-    console.log(`Received ${event.streams.length} streams with ${event.streams[0]?.getTracks().length || 0} tracks from ${peerId}`);
-    
-    // Find the peer in our list
-    const peerIndex = peers.value.findIndex(p => p.id === peerId);
-    if (peerIndex === -1) {
-      console.warn(`Received track for unknown peer ${peerId}`);
-      return;
+    } else {
+      console.warn('No local stream available when creating peer connection');
     }
     
-    // Function to add stream to video element
-    const addStreamToVideo = () => {
-      if (!peers.value[peerIndex].videoEl) {
-        console.warn(`Video element for peer ${peerId} not ready yet, will retry`);
-        return false;
-      }
-      
-      try {
-        // Set the srcObject directly to the received stream
-        peers.value[peerIndex].videoEl.srcObject = event.streams[0];
-        console.log(`Successfully set video stream for peer ${peerId}`);
-        return true;
-      } catch (err) {
-        console.error(`Error setting srcObject for peer ${peerId}:`, err);
-        return false;
+    // Handle ICE candidates
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log(`Sending ICE candidate to ${peerId}`);
+        sendToServer({
+          type: 'signal',
+          user: username.value,
+          content: {
+            type: 'ice-candidate',
+            target: peerId,
+            candidate: event.candidate
+          }
+        });
       }
     };
     
-    // Try to add stream now
-    if (!addStreamToVideo()) {
-      // If it fails, retry a few times
-      let attempts = 0;
-      const maxAttempts = 5;
-      const retryInterval = setInterval(() => {
-        attempts++;
-        if (addStreamToVideo() || attempts >= maxAttempts) {
-          clearInterval(retryInterval);
-          if (attempts >= maxAttempts) {
-            console.error(`Failed to set video for peer ${peerId} after ${maxAttempts} attempts`);
-          }
+    // Handle ICE connection state changes
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state for ${peerId}: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        console.warn(`ICE connection with ${peerId} failed or disconnected. Attempting to restart.`);
+        // Attempt to restart ICE connection
+        createAndSendOffer(peerId, true);
+      }
+    };
+    
+    // Handle connection state changes
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state for ${peerId}: ${pc.connectionState}`);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        console.warn(`Connection with ${peerId} failed or closed. Cleaning up.`);
+        // Remove peer from list
+        const peerIndex = peers.value.findIndex(p => p.id === peerId);
+        if (peerIndex !== -1) {
+          peers.value.splice(peerIndex, 1);
         }
-      }, 1000);
-    }
-  };
-  
-  return pc;
+        // Clean up peer connection
+        if (peerConnections.value[peerId]) {
+          delete peerConnections.value[peerId];
+        }
+      }
+    };
+    
+    // Handle incoming tracks
+    pc.ontrack = (event) => {
+      console.log(`Received track from ${peerId}:`, event.track.kind);
+      console.log(`Track enabled: ${event.track.enabled}, muted: ${event.track.muted}`);
+      
+      // Make sure the peer exists in our list
+      const peerIndex = peers.value.findIndex(p => p.id === peerId);
+      if (peerIndex === -1) {
+        console.log(`Adding peer ${peerId} to list when track received`);
+        peers.value.push({
+          id: peerId,
+          name: peerId,
+          videoEl: null
+        });
+      }
+      
+      // Ensure we add both audio and video tracks to the same stream
+      const attachRemoteStream = () => {
+        const peerIndex = peers.value.findIndex(p => p.id === peerId);
+        if (peerIndex === -1) return false;
+        
+        const videoEl = peers.value[peerIndex].videoEl;
+        if (!videoEl) {
+          console.log(`Video element for ${peerId} not ready yet`);
+          return false;
+        }
+        
+        try {
+          if (!event.streams || event.streams.length === 0) {
+            console.warn(`No streams in track event for ${peerId}`);
+            return false;
+          }
+          
+          // Use the first stream
+          const stream = event.streams[0];
+          
+          // If videoEl already has a srcObject, make sure it's the same stream
+          if (videoEl.srcObject) {
+            // Check if we're adding to an existing stream or replacing it
+            if (videoEl.srcObject.id !== stream.id) {
+              console.log(`Replacing stream for ${peerId}`);
+              videoEl.srcObject = stream;
+            } else {
+              console.log(`Using existing stream for ${peerId}`);
+            }
+          } else {
+            console.log(`Setting new stream for ${peerId}`);
+            videoEl.srcObject = stream;
+          }
+          
+          // Ensure the video plays
+          videoEl.play().catch(err => {
+            console.warn(`Error playing video for ${peerId}:`, err);
+            // Try again with muted to work around autoplay policy
+            videoEl.muted = true;
+            videoEl.play().catch(e => console.error(`Still can't play:`, e));
+          });
+          
+          console.log(`Successfully attached stream for ${peerId}`);
+          return true;
+        } catch (err) {
+          console.error(`Error attaching stream for ${peerId}:`, err);
+          return false;
+        }
+      };
+      
+      // Try to attach immediately
+      if (!attachRemoteStream()) {
+        // Retry a few times
+        let attempts = 0;
+        const retryAttach = setInterval(() => {
+          attempts++;
+          if (attachRemoteStream() || attempts >= 5) {
+            clearInterval(retryAttach);
+            if (attempts >= 5) {
+              console.error(`Failed to attach stream for ${peerId} after multiple attempts`);
+            }
+          }
+        }, 1000);
+      }
+    };
+    
+    return pc;
+  } catch (error) {
+    console.error(`Error creating peer connection for ${peerId}:`, error);
+    return null;
+  }
 }
 
 // Create and send WebRTC offer
-function createAndSendOffer(peerId) {
+function createAndSendOffer(peerId, isRestart = false) {
   const pc = peerConnections.value[peerId];
-  if (!pc) return;
+  if (!pc) {
+    console.warn(`Can't create offer - no connection for ${peerId}`);
+    return;
+  }
   
-  pc.createOffer()
+  const offerOptions = isRestart ? { iceRestart: true } : undefined;
+  
+  pc.createOffer(offerOptions)
     .then(offer => {
-      pc.setLocalDescription(offer);
+      console.log(`Created offer for ${peerId}, setting local description`);
+      return pc.setLocalDescription(offer);
+    })
+    .then(() => {
+      console.log(`Sending offer to ${peerId}`);
       sendToServer({
         type: 'signal',
         user: username.value,
         content: {
           type: 'offer',
           target: peerId,
-          sdp: offer
+          sdp: pc.localDescription
         }
       });
     })
-    .catch(error => console.error('Error creating offer:', error));
+    .catch(error => console.error(`Error creating/sending offer to ${peerId}:`, error));
 }
 
 // Send message to WebSocket server
@@ -963,5 +1121,131 @@ async function restartPeerConnection(peerId) {
   } catch (err) {
     console.error(`Failed to restart connection with ${peerId}:`, err);
   }
+}
+
+// Add this function to manually clean up stale peers
+function cleanupStalePeers() {
+  console.log("Cleaning up stale peers...");
+  
+  // Check each peer connection
+  for (const peerId in peerConnections.value) {
+    const pc = peerConnections.value[peerId];
+    
+    // Check if connection is closed, failed, or doesn't have a video track
+    if (!pc || 
+        pc.connectionState === 'closed' || 
+        pc.connectionState === 'failed' ||
+        pc.iceConnectionState === 'disconnected' ||
+        pc.iceConnectionState === 'failed') {
+      
+      console.log(`Removing stale peer connection: ${peerId}`);
+      
+      // Close the connection if it exists
+      if (pc) {
+        pc.close();
+      }
+      
+      // Remove from peerConnections
+      delete peerConnections.value[peerId];
+      
+      // Remove from peers list
+      const peerIndex = peers.value.findIndex(p => p.id === peerId);
+      if (peerIndex !== -1) {
+        peers.value.splice(peerIndex, 1);
+      }
+    }
+  }
+}
+
+// Update the ref handler for remote video elements
+function addVideoElement(peerId, element) {
+  if (!element) return;
+  
+  console.log(`Setting video element reference for peer ${peerId}`);
+  const peerIndex = peers.value.findIndex(p => p.id === peerId);
+  if (peerIndex !== -1) {
+    peers.value[peerIndex].videoEl = element;
+    
+    // Check if there's an existing connection with streams
+    const pc = peerConnections.value[peerId];
+    if (pc) {
+      // Find all receivers with video tracks
+      const receivers = pc.getReceivers();
+      const streams = receivers
+        .filter(r => r.track && r.track.kind === 'video' && r.track.enabled)
+        .map(r => {
+          if (r.track.readyState === 'live') {
+            return r.streams && r.streams.length > 0 ? r.streams[0] : null;
+          }
+          return null;
+        })
+        .filter(s => s !== null);
+      
+      if (streams.length > 0) {
+        console.log(`Found existing stream for ${peerId}, attaching to element`);
+        element.srcObject = streams[0];
+        element.play().catch(e => {
+          console.warn(`Error playing video:`, e);
+          // Try with muted to bypass autoplay restrictions
+          element.muted = true;
+          element.play().catch(err => console.error(`Still can't play:`, err));
+        });
+      } else {
+        console.log(`No valid video streams found for ${peerId}`);
+      }
+    }
+  } else {
+    console.warn(`Tried to set video element for unknown peer ${peerId}`);
+  }
+}
+
+// Add a helper function to update and refresh video elements
+function refreshVideoElements() {
+  // First clean up any stale peers
+  cleanupStalePeers();
+  
+  // Then refresh video elements
+  nextTick(() => {
+    peers.value.forEach(peer => {
+      if (peer.videoEl) {
+        // Check if video element is playing correctly
+        if (!peer.videoEl.srcObject || 
+            peer.videoEl.srcObject.getVideoTracks().length === 0 ||
+            peer.videoEl.srcObject.getVideoTracks()[0].readyState !== 'live') {
+          
+          console.log(`Refreshing video for peer ${peer.id}`);
+          const pc = peerConnections.value[peer.id];
+          
+          if (pc) {
+            // Get all streams from this connection
+            const receivers = pc.getReceivers();
+            const videoReceivers = receivers.filter(r => 
+              r.track && 
+              r.track.kind === 'video' && 
+              r.track.readyState === 'live' &&
+              r.track.enabled
+            );
+            
+            if (videoReceivers.length > 0) {
+              // Use the first available stream
+              const stream = videoReceivers[0].streams && videoReceivers[0].streams.length > 0
+                ? videoReceivers[0].streams[0]
+                : new MediaStream([videoReceivers[0].track]);
+              
+              console.log(`Refreshing stream for ${peer.id}`);
+              peer.videoEl.srcObject = stream;
+              peer.videoEl.play().catch(e => {
+                console.warn(`Error playing refreshed video:`, e);
+                peer.videoEl.muted = true;
+                peer.videoEl.play().catch(err => console.error(`Still can't play:`, err));
+              });
+            } else {
+              console.log(`No video tracks available for ${peer.id}`);
+            }
+          }
+        }
+      }
+    });
+  });
 }
 </script> 

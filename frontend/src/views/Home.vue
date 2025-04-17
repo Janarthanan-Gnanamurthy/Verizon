@@ -7,7 +7,7 @@
              class="lg:max-w-md rounded-r-box h-full object-cover" alt="Learning with technology" />
         <div class="p-8 lg:p-12">
           <div class="badge badge-accent mb-2">Live Learning</div>
-          <h1 class="text-4xl lg:text-5xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+          <h1 class="text-4xl lg:text-5xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text">
             Interactive Education Platform
           </h1>
           <p class="py-6 text-lg">
@@ -52,12 +52,12 @@
                 <span class="text-2xl">➕</span>
               </div>
             </div>
-            <h2 class="card-title text-2xl">Create New Session</h2>
+            <h2 class="card-title text-2xl text-black">Create New Session</h2>
           </div>
           <form @submit.prevent="createRoom" class="space-y-4">
             <div class="form-control">
               <label class="label">
-                <span class="label-text font-medium">Session Name</span>
+                <span class="label-text font-medium text-black">Session Name</span>
               </label>
               <input 
                 type="text" 
@@ -73,7 +73,7 @@
 
             <div class="form-control">
               <label class="label">
-                <span class="label-text font-medium">Your Name</span>
+                <span class="label-text font-medium text-black">Your Name</span>
               </label>
               <input 
                 type="text" 
