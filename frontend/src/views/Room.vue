@@ -117,6 +117,13 @@
                 </svg>
               </button>
               
+              <!-- End Session Button -->
+              <button @click="endSession" class="btn btn-circle btn-warning">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l3 3m0 0l3-3m-3 3v-7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </button>
+              
               <!-- Leave Room -->
               <button @click="leaveRoom" class="btn btn-circle btn-error">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
@@ -304,7 +311,7 @@ import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 
-axios.defaults.baseURL = 'http://172.17.2.29:8000';
+axios.defaults.baseURL = 'http://192.168.72.220:8000';
 
 // Router and route setup
 const route = useRoute();
@@ -478,7 +485,7 @@ async function setupMediaDevices() {
 // Connect to the WebSocket server for signaling
 function connectToWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = '172.17.2.29:8000';
+  const host = '192.168.72.220:8000';
   websocket.value = new WebSocket(`${protocol}//${host}/ws/${roomId.value}`);
   
   websocket.value.onopen = () => {
@@ -521,6 +528,9 @@ function handleWebSocketMessage(data) {
       
     case 'ai_summary':
       aiSummaries.value.push(data);
+      // Store the latest summary in localStorage for the quiz page
+      localStorage.setItem(`room_${roomId.value}_summary`, data.content);
+      
       // Notify user about new summary
       chatMessages.value.push({
         user: 'System',
@@ -529,6 +539,21 @@ function handleWebSocketMessage(data) {
       });
       break;
       
+    case 'session_complete':
+      // Notify user that the session is complete
+      chatMessages.value.push({
+        user: 'System',
+        content: 'The session has been completed. Redirecting to quiz...',
+        timestamp: Date.now()
+      });
+      
+      // Wait a moment for users to see the message
+      setTimeout(() => {
+        // Redirect to the quiz page
+        router.push(`/quiz/${roomId.value}`);
+      }, 3000);
+      break;
+
     case 'system':
       console.log('Received system message:', data.content);
       
@@ -1231,5 +1256,23 @@ function refreshVideoElements() {
       }
     });
   });
+}
+
+// Add the endSession function
+function endSession() {
+  if (confirm('Are you sure you want to end this session? All participants will be redirected to a quiz.')) {
+    // Get the combined transcript content to generate questions
+    const allTranscriptionText = transcription.value
+      .map(entry => entry.content)
+      .join(' ');
+    
+    // Send end session signal to server
+    sendToServer({
+      type: 'end_session',
+      user: username.value,
+      content: allTranscriptionText,
+      timestamp: Date.now()
+    });
+  }
 }
 </script> 

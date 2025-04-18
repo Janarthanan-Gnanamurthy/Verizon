@@ -214,7 +214,7 @@ async def process_transcription(text: str, background_tasks: BackgroundTasks = N
                     "content": text
                 }
             ],
-            model="llama3-8b-8192",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             max_tokens=500
         )
         return response.choices[0].message.content
@@ -222,6 +222,111 @@ async def process_transcription(text: str, background_tasks: BackgroundTasks = N
         error_msg = f"Error processing with Groq: {str(e)}"
         print(error_msg)
         return error_msg
+
+async def generate_mcq_questions(text: str, num_questions: int = 5) -> dict:
+    """Generate multiple choice questions based on class content"""
+    if not groq_api_key:
+        return {"error": "Groq API key not configured"}
+    
+    try:
+        response = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"You are an educational assessment tool. Create {num_questions} multiple-choice questions based on the following class content. For each question, provide 4 options with one correct answer clearly marked. Format your response as a JSON array with each question containing 'question', 'options' (array), and 'correctOptionIndex' (0-based index of correct answer). Provide Only the JSON array, no other text or commentary."
+                },
+                {
+                    "role": "user",
+                    "content": text
+                }
+            ],
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            max_tokens=2000
+        )
+        
+        # Extract the response and parse it as JSON
+        questions_text = response.choices[0].message.content
+        print(f"Groq response: {questions_text[:100]}...") # Log part of the response
+        
+        # Strip any markdown code block markers if present
+        questions_text = questions_text.replace("```json", "").replace("```", "").strip()
+        
+        try:
+            questions = json.loads(questions_text)
+
+            print(f"Questions: {questions}")
+            return {"questions": questions}
+        except json.JSONDecodeError as json_err:
+            print(f"Error parsing JSON from Groq: {str(json_err)}")
+            print(f"Response content: {questions_text[:200]}...")
+            # Provide fallback questions
+            return {
+                "questions": get_fallback_questions(),
+                "note": "These are fallback questions as the API response could not be parsed"
+            }
+    except Exception as e:
+        error_msg = f"Error generating MCQs with Groq: {str(e)}"
+        print(error_msg)
+        # Return fallback questions instead of an error
+        return {
+            "questions": get_fallback_questions(),
+            "note": "These are fallback questions as there was an API error"
+        }
+
+def get_fallback_questions():
+    """Provide fallback questions when the API fails"""
+    return [
+        {
+            "question": "What is the primary benefit of AI-powered transcription in an educational setting?",
+            "options": [
+                "Reducing the need for teachers",
+                "Creating accurate records of class discussions",
+                "Replacing traditional note-taking entirely",
+                "Making classes shorter"
+            ],
+            "correctOptionIndex": 1
+        },
+        {
+            "question": "How does real-time video conferencing enhance the learning experience?",
+            "options": [
+                "By making classes more stressful",
+                "By enabling facial recognition of students",
+                "By facilitating immediate feedback and interaction",
+                "By recording students for later evaluation"
+            ],
+            "correctOptionIndex": 2
+        },
+        {
+            "question": "What is a key advantage of AI-generated summaries?",
+            "options": [
+                "They replace the need to attend class",
+                "They highlight key concepts that might be missed in notes",
+                "They are always 100% accurate",
+                "They can predict test questions"
+            ],
+            "correctOptionIndex": 1
+        },
+        {
+            "question": "Which of the following is a best practice when participating in an online class?",
+            "options": [
+                "Keeping your camera off at all times",
+                "Muting your microphone when not speaking",
+                "Typing instead of using your voice",
+                "Connecting from public places with background noise"
+            ],
+            "correctOptionIndex": 1
+        },
+        {
+            "question": "How can post-session quizzes benefit learning?",
+            "options": [
+                "They add unnecessary stress",
+                "They reinforce key concepts through active recall",
+                "They only benefit visual learners",
+                "They are only useful for grading purposes"
+            ],
+            "correctOptionIndex": 1
+        }
+    ]
 
 # API endpoints
 @app.get("/")
@@ -294,8 +399,46 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, background_task
                     "timestamp": message["timestamp"]
                 }, room_id)
             
-            # Inside the websocket_endpoint function in main.py, replace the signal block
-
+            # New handler for session completion
+            elif message["type"] == "end_session":
+                # If we have accumulated transcription content, we can generate questions
+                # For now, we'll just signal the frontend to redirect to the quiz page
+                session_data = {
+                    "type": "session_complete",
+                    "room_id": room_id,
+                    "timestamp": int(time.time() * 1000)
+                }
+                
+                # Tell all participants the session is complete
+                await manager.broadcast(session_data, room_id)
+                
+                # Generate quiz data - before redirecting to ensure it's ready
+                try:
+                    # Get the final transcription content if provided
+                    quiz_data = await generate_mcq_questions(message["content"])
+                    
+                    # Store the quiz data temporarily (you might want to use a more persistent storage)
+                    
+                    # Make sure we got valid quiz data
+                    if "questions" not in quiz_data:
+                        quiz_data = {"questions": get_fallback_questions()}
+                        
+                    # Store the quiz data
+                    async with rooms_lock:
+                        if room_id in rooms:
+                            rooms[room_id].quiz_data = quiz_data
+                            print(f"Quiz data stored for room {room_id} with {len(quiz_data['questions'])} questions")
+                        else:
+                            print(f"Error: Room {room_id} not found when storing quiz data")
+                except Exception as e:
+                    print(f"Error generating quiz during end_session: {str(e)}")
+                    # Still provide fallback questions if there's an error
+                    fallback = {"questions": get_fallback_questions()}
+                    async with rooms_lock:
+                        if room_id in rooms:
+                            rooms[room_id].quiz_data = fallback
+            
+            # Handle signals for WebRTC
             elif message["type"] == "signal":
                 sender_user_id = message.get("user")
                 content = message.get("content", {})
@@ -362,6 +505,7 @@ class Room(BaseModel):
     host_id: str
     created_at: int
     participants: List[Participant] = []
+    quiz_data: Optional[Dict[str, Any]] = None  # To store generated MCQ questions
 
 # Rooms storage (in-memory for simplicity)
 rooms: Dict[str, Room] = {}
@@ -426,6 +570,54 @@ async def get_room(room_id: str):
     room_data["participant_count"] = len(active_participants)
     
     return room_data
+
+@app.get("/rooms/{room_id}/quiz")
+async def get_room_quiz(room_id: str):
+    """Get the quiz data for a specific room"""
+    async with rooms_lock:
+        if room_id not in rooms:
+            raise HTTPException(status_code=404, detail="Room not found")
+        
+        room = rooms[room_id]
+        if not room.quiz_data:
+            raise HTTPException(status_code=404, detail="No quiz available for this room")
+        
+        return room.quiz_data
+
+# Model for transcription content
+class TranscriptionContent(BaseModel):
+    content: str
+    num_questions: int = 5
+
+@app.post("/generate-quiz/")
+async def create_quiz(data: TranscriptionContent):
+    """Generate MCQ questions from transcription content"""
+    result = await generate_mcq_questions(data.content, data.num_questions)
+    return result
+
+# Model for manually generating quiz for a room
+class GenerateRoomQuizRequest(BaseModel):
+    sample_text: str = "This is a sample lecture about programming. Variables are containers for storing data values. Functions are blocks of code that perform a specific task. Python is a popular programming language used for web development, data analysis, AI and more."
+
+@app.post("/rooms/{room_id}/generate-test-quiz")
+async def generate_test_quiz(room_id: str, data: GenerateRoomQuizRequest):
+    """Generate test MCQ questions for a specific room"""
+    async with rooms_lock:
+        if room_id not in rooms:
+            raise HTTPException(status_code=404, detail="Room not found")
+        
+        # Generate MCQs from the sample text or provided text
+        quiz_data = await generate_mcq_questions(data.sample_text)
+        
+        # Make sure we're storing valid quiz data and not an error
+        if "questions" not in quiz_data:
+            quiz_data = {"questions": get_fallback_questions()}
+        
+        # Store the quiz data in the room
+        room = rooms[room_id]
+        room.quiz_data = quiz_data
+        
+        return {"message": "Test quiz generated successfully", "quiz_data": quiz_data}
 
 if __name__ == "__main__":
     import uvicorn

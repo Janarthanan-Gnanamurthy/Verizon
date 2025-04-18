@@ -207,7 +207,7 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
 
-axios.defaults.baseURL = 'http://172.17.2.29:8000';
+axios.defaults.baseURL = 'http://192.168.72.220:8000';
 
 const router = useRouter();
 const roomName = ref('');

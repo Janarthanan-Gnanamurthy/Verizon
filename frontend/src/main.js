@@ -4,12 +4,14 @@ import { createPinia } from 'pinia';
 import App from './App.vue';
 import Home from './views/Home.vue';
 import Room from './views/Room.vue';
+import QuizView from './views/QuizView.vue';
 import './assets/tailwind.css';
 
 // Create router
 const routes = [
   { path: '/', component: Home },
-  { path: '/room/:roomId', component: Room }
+  { path: '/room/:roomId', component: Room },
+  { path: '/quiz/:roomId', component: QuizView }
 ];
 
 const router = createRouter({
