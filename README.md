@@ -1,6 +1,6 @@
 # Educational Platform
 
-A live tutoring platform using WebRTC for video conferencing and Groq for AI features.
+A live tutoring platform using WebRTC for video conferencing, Groq for AI features, and Fluvio for video feed storage.
 
 ## Features
 
@@ -10,13 +10,15 @@ A live tutoring platform using WebRTC for video conferencing and Groq for AI fea
 - AI-powered summarization using Groq
 - Modern UI with Tailwind CSS and DaisyUI
 - Multi-user support with real-time updates
+- Video feed storage using Fluvio
 
 ## Tech Stack
 
-- **Backend**: FastAPI, WebSockets, Groq API
+- **Backend**: FastAPI, WebSockets, Groq API, Fluvio
 - **Frontend**: Vue.js, WebRTC, Web Speech API
 - **Styling**: Tailwind CSS, DaisyUI
 - **Real-time Communication**: WebSockets, WebRTC
+- **Data Storage**: Infinityon's Fluvio
 
 ## Setup
 
@@ -25,6 +27,24 @@ A live tutoring platform using WebRTC for video conferencing and Groq for AI fea
 - Python 3.8+
 - Node.js 14+
 - Groq API key (sign up at https://console.groq.com)
+- Fluvio installed (follow instructions at https://www.fluvio.io/docs/get-started/quick-start/)
+
+### Fluvio Setup
+
+1. Install Fluvio CLI:
+   ```
+   curl -fsS https://packages.fluvio.io/v1/install.sh | bash
+   ```
+
+2. Start a local Fluvio cluster:
+   ```
+   fluvio cluster start
+   ```
+
+3. Verify the cluster is running:
+   ```
+   fluvio cluster status
+   ```
 
 ### Backend Setup
 
@@ -47,9 +67,11 @@ A live tutoring platform using WebRTC for video conferencing and Groq for AI fea
    pip install -r requirements.txt
    ```
 
-5. Create a `.env` file based on `.env.example` and add your Groq API key:
+5. Create a `.env` file based on `.env.example` and add your Groq API key and Fluvio settings:
    ```
    GROQ_API_KEY=your_groq_api_key_here
+   FLUVIO_ENDPOINT=localhost:9003
+   FLUVIO_TOPIC=video-feeds
    ```
 
 6. Start the backend server:
@@ -83,6 +105,16 @@ A live tutoring platform using WebRTC for video conferencing and Groq for AI fea
 3. Allow camera and microphone access when prompted
 4. Use the controls to toggle your microphone, camera, and start/stop transcription
 5. Start transcription to automatically generate AI summaries
+6. Video feeds are automatically stored in Fluvio for later playback and analysis
+
+## Accessing Stored Video Data
+
+The platform provides API endpoints to access stored video data:
+
+- `/rooms/{room_id}/video-data` - Retrieve stored video frames
+- `/rooms/{room_id}/transcriptions` - Retrieve stored transcriptions
+
+You can filter the data by timestamp range and limit the number of results.
 
 ## Browser Support
 
@@ -91,7 +123,7 @@ A live tutoring platform using WebRTC for video conferencing and Groq for AI fea
 
 ## Future Enhancements
 
+- Advanced video processing and analysis using stored feeds
 - Integration with Screenpipe's Terminator for user activity monitoring
-- Integration with Fluvio for real-time data streaming
 - Advanced AI features like content analysis and personalized learning paths
 - Breakout rooms for group discussions 

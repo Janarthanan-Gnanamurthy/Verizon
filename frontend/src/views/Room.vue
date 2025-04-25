@@ -110,6 +110,27 @@
                 </div>
               </div>
               
+              <!-- Toggle Frame Capture -->
+              <div class="dropdown dropdown-top">
+                <button @click="toggleFrameCapture" :class="isCapturingFrames ? 'btn-accent' : 'btn-outline'" class="btn btn-circle">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z" />
+                  </svg>
+                </button>
+                <div v-if="isCapturingFrames" class="dropdown-content z-[1] p-2 shadow-xl bg-base-200 rounded-box w-52 -translate-y-2">
+                  <div class="px-2 py-1 font-medium text-sm">Frame Capture Active</div>
+                  <div class="text-xs px-2 pb-2 opacity-70">Recording to Fluvio every {{ frameCaptureInterval/1000 }}s</div>
+                </div>
+              </div>
+              
+              <!-- View Archives -->
+              <button @click="viewArchives" class="btn btn-circle btn-outline">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+                </svg>
+              </button>
+              
               <!-- Share Screen (placeholder) -->
               <button class="btn btn-circle btn-outline">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
@@ -311,7 +332,7 @@ import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 
-axios.defaults.baseURL = 'http://192.168.72.220:8000';
+axios.defaults.baseURL = 'http://172.17.2.29:8000';
 
 // Router and route setup
 const route = useRoute();
@@ -341,6 +362,13 @@ const currentTranscription = ref('');
 const aiSummaries = ref([]);
 const recognition = ref(null);
 const transcriptionTimer = ref(null);
+
+// Frame capture for Fluvio
+const isCapturingFrames = ref(false);
+const frameCaptureInterval = ref(5000); // Capture every 5 seconds
+const frameCapturerId = ref(null);
+const frameCanvas = ref(document.createElement('canvas'));
+const frameContext = ref(null);
 
 // Helper function to switch to transcription tab and start it
 function startTranscriptionAndSwitchTab() {
@@ -397,7 +425,10 @@ onMounted(async () => {
     const videoRefreshInterval = setInterval(() => {
       refreshVideoElements();
     }, 5000);
-    
+
+    // Initialize the canvas context for frame captures
+    frameContext.value = frameCanvas.value.getContext('2d');
+
     // Store the interval to clear it on unmount
     onBeforeUnmount(() => {
       // Clean up all peer connections
@@ -435,6 +466,11 @@ onBeforeUnmount(() => {
   
   // Stop speech recognition
   stopTranscription();
+
+  // Stop frame capture
+  if (isCapturingFrames.value) {
+    stopFrameCapture();
+  }
 });
 
 // Setup media devices (camera and microphone)
@@ -485,7 +521,7 @@ async function setupMediaDevices() {
 // Connect to the WebSocket server for signaling
 function connectToWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = '192.168.72.220:8000';
+  const host = '172.17.2.29:8000';
   websocket.value = new WebSocket(`${protocol}//${host}/ws/${roomId.value}`);
   
   websocket.value.onopen = () => {
@@ -1274,5 +1310,99 @@ function endSession() {
       timestamp: Date.now()
     });
   }
+}
+
+// Toggle frame capture for Fluvio storage
+function toggleFrameCapture() {
+  if (isCapturingFrames.value) {
+    stopFrameCapture();
+  } else {
+    startFrameCapture();
+  }
+}
+
+// Start capturing frames at regular intervals
+function startFrameCapture() {
+  if (!localStream.value || isVideoOff.value) {
+    alert('Please enable your camera to capture frames');
+    return;
+  }
+  
+  isCapturingFrames.value = true;
+  
+  // Capture a frame immediately
+  captureAndSendFrame();
+  
+  // Set up interval for regular captures
+  frameCapturerId.value = setInterval(() => {
+    captureAndSendFrame();
+  }, frameCaptureInterval.value);
+  
+  // Add system message
+  chatMessages.value.push({
+    user: 'System',
+    content: 'Frame capture started - storing video to Fluvio',
+    timestamp: Date.now()
+  });
+}
+
+// Stop capturing frames
+function stopFrameCapture() {
+  if (frameCapturerId.value) {
+    clearInterval(frameCapturerId.value);
+    frameCapturerId.value = null;
+  }
+  
+  isCapturingFrames.value = false;
+  
+  // Add system message
+  chatMessages.value.push({
+    user: 'System',
+    content: 'Frame capture stopped',
+    timestamp: Date.now()
+  });
+}
+
+// Capture a frame from the video and send it to the server
+function captureAndSendFrame() {
+  if (!localVideo.value || !frameContext.value) return;
+  
+  try {
+    // Set canvas dimensions to match video
+    const video = localVideo.value;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    
+    if (width === 0 || height === 0) {
+      console.log('Video dimensions not available yet');
+      return;
+    }
+    
+    frameCanvas.value.width = width;
+    frameCanvas.value.height = height;
+    
+    // Draw the current video frame to the canvas
+    frameContext.value.drawImage(video, 0, 0, width, height);
+    
+    // Get the frame as a data URL (base64 encoded)
+    const frameData = frameCanvas.value.toDataURL('image/jpeg', 0.7); // 70% quality JPEG
+    
+    // Send the frame to the server
+    sendToServer({
+      type: 'video_frame',
+      user: username.value,
+      frame_data: frameData,
+      timestamp: Date.now()
+    });
+    
+    console.log('Frame captured and sent to Fluvio');
+  } catch (error) {
+    console.error('Error capturing frame:', error);
+  }
+}
+
+// Navigate to archives page
+function viewArchives() {
+  router.push('/archives');
 }
 </script> 

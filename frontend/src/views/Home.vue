@@ -149,6 +149,31 @@
       </div>
     </div>
 
+    <!-- Archives Section -->
+    <div class="card bg-base-100 shadow-xl overflow-hidden my-8">
+      <div class="card-body">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="avatar placeholder">
+            <div class="bg-accent text-accent-content rounded-full w-12">
+              <span class="text-2xl">📼</span>
+            </div>
+          </div>
+          <h2 class="card-title text-2xl">Archived Sessions</h2>
+        </div>
+        
+        <p class="mb-4">Access previously recorded sessions with video frames and transcriptions stored in Fluvio. Review AI-generated summaries and quizzes from past classes.</p>
+        
+        <div class="flex justify-end">
+          <router-link to="/archives" class="btn btn-accent">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+            </svg>
+            View Archives
+          </router-link>
+        </div>
+      </div>
+    </div>
+
     <!-- Features Section -->
     <div class="my-12">
       <h2 class="text-2xl font-bold text-center mb-8">Platform Features</h2>
@@ -207,7 +232,7 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import axios from 'axios';
 
-axios.defaults.baseURL = 'http://192.168.72.220:8000';
+axios.defaults.baseURL = 'http://172.17.2.29:8000';
 
 const router = useRouter();
 const roomName = ref('');

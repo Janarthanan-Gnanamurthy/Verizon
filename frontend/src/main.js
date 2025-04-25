@@ -5,13 +5,15 @@ import App from './App.vue';
 import Home from './views/Home.vue';
 import Room from './views/Room.vue';
 import QuizView from './views/QuizView.vue';
+import ArchiveView from './views/ArchiveView.vue';
 import './assets/tailwind.css';
 
 // Create router
 const routes = [
   { path: '/', component: Home },
   { path: '/room/:roomId', component: Room },
-  { path: '/quiz/:roomId', component: QuizView }
+  { path: '/quiz/:roomId', component: QuizView },
+  { path: '/archives', component: ArchiveView }
 ];
 
 const router = createRouter({

@@ -8,6 +8,11 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import asyncio
+import base64
+
+# Import Fluvio for video stream storage
+from fluvio import Fluvio
+from fluvio.admin import Admin
 
 # Load environment variables
 load_dotenv()
@@ -27,6 +32,52 @@ app.add_middleware(
 # Initialize Groq client
 groq_api_key = os.getenv("GROQ_API_KEY", "")
 groq_client = groq.Client(api_key=groq_api_key)
+
+# Initialize Fluvio client
+fluvio_endpoint = os.getenv("FLUVIO_ENDPOINT", "localhost:9003")
+fluvio_topic = os.getenv("FLUVIO_TOPIC", "video-feeds")
+fluvio_admin = None
+fluvio_client = None
+
+async def setup_fluvio():
+    global fluvio_admin, fluvio_client
+    try:
+        # Initialize Fluvio Admin client for managing topics
+        fluvio_admin = Admin.connect(endpoint=fluvio_endpoint)
+        
+        # Create topic if it doesn't exist
+        topics = fluvio_admin.list_topics()
+        if fluvio_topic not in topics:
+            fluvio_admin.create_topic(fluvio_topic)
+            print(f"Created Fluvio topic: {fluvio_topic}")
+        
+        # Initialize Fluvio client
+        fluvio_client = Fluvio.connect(endpoint=fluvio_endpoint)
+        print(f"Connected to Fluvio at {fluvio_endpoint}")
+        return True
+    except Exception as e:
+        print(f"Error setting up Fluvio: {str(e)}")
+        return False
+
+# Run Fluvio setup on application startup
+@app.on_event("startup")
+async def startup_event():
+    await setup_fluvio()
+
+# Close Fluvio connections on shutdown
+@app.on_event("shutdown")
+async def shutdown_event():
+    global fluvio_client, fluvio_admin
+    try:
+        if fluvio_client:
+            fluvio_client.close()
+            print("Closed Fluvio client connection")
+        
+        if fluvio_admin:
+            fluvio_admin.close()
+            print("Closed Fluvio admin connection")
+    except Exception as e:
+        print(f"Error closing Fluvio connections: {str(e)}")
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -328,6 +379,45 @@ def get_fallback_questions():
         }
     ]
 
+async def store_video_frame(room_id: str, user_id: str, frame_data: str, timestamp: int, frame_type: str = "video"):
+    """Store video frame data in Fluvio"""
+    if fluvio_client is None:
+        print("Fluvio client not initialized, attempting to set up")
+        success = await setup_fluvio()
+        if not success:
+            print("Failed to set up Fluvio, cannot store video frame")
+            return False
+    
+    try:
+        # Create a producer for the video feeds topic
+        producer = fluvio_client.topic_producer(fluvio_topic)
+        
+        # Create metadata for the frame
+        metadata = {
+            "room_id": room_id,
+            "user_id": user_id,
+            "timestamp": timestamp,
+            "type": frame_type
+        }
+        
+        # Prepare the data to store
+        data = {
+            "metadata": metadata,
+            "frame_data": frame_data
+        }
+        
+        # Convert to JSON and send to Fluvio
+        producer.send_string(json.dumps(data))
+        print(f"Stored {frame_type} frame for user {user_id} in room {room_id}")
+        return True
+    except Exception as e:
+        print(f"Error storing video frame in Fluvio: {str(e)}")
+        return False
+
+async def store_transcription(room_id: str, user_id: str, text: str, timestamp: int):
+    """Store transcription data in Fluvio"""
+    return await store_video_frame(room_id, user_id, text, timestamp, frame_type="transcription")
+
 # API endpoints
 @app.get("/")
 async def root():
@@ -380,7 +470,36 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, background_task
                     "timestamp": message["timestamp"]
                 }, room_id, exclude_user=message["user"])
             
+            elif message["type"] == "video_frame":
+                # Store video frame in Fluvio
+                if "frame_data" in message:
+                    await store_video_frame(
+                        room_id=room_id, 
+                        user_id=message["user"], 
+                        frame_data=message["frame_data"],
+                        timestamp=message["timestamp"]
+                    )
+                    
+                    # Optionally broadcast a notification that a frame was stored
+                    # This might be useful for logging or debugging
+                    # We don't broadcast the actual frame to avoid duplicate data
+                    """
+                    await manager.broadcast({
+                        "type": "frame_stored",
+                        "user": message["user"],
+                        "timestamp": message["timestamp"]
+                    }, room_id, exclude_user=message["user"])
+                    """
+            
             elif message["type"] == "transcription":
+                # Store transcription in Fluvio
+                await store_transcription(
+                    room_id=room_id,
+                    user_id=message["user"],
+                    text=message["content"],
+                    timestamp=message["timestamp"]
+                )
+                
                 # Process transcription with AI
                 summary = await process_transcription(message["content"], background_tasks)
                 
@@ -601,24 +720,104 @@ class GenerateRoomQuizRequest(BaseModel):
 
 @app.post("/rooms/{room_id}/generate-test-quiz")
 async def generate_test_quiz(room_id: str, data: GenerateRoomQuizRequest):
-    """Generate test MCQ questions for a specific room"""
-    async with rooms_lock:
-        if room_id not in rooms:
-            raise HTTPException(status_code=404, detail="Room not found")
-        
-        # Generate MCQs from the sample text or provided text
+    try:
         quiz_data = await generate_mcq_questions(data.sample_text)
         
-        # Make sure we're storing valid quiz data and not an error
-        if "questions" not in quiz_data:
-            quiz_data = {"questions": get_fallback_questions()}
+        async with rooms_lock:
+            if room_id in rooms:
+                rooms[room_id].quiz_data = quiz_data
+                print(f"Test quiz data stored for room {room_id}")
+                
+        return {"status": "success", "message": "Test quiz data generated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating test quiz: {str(e)}")
+
+# Fluvio data retrieval
+
+class FluvioDataRequest(BaseModel):
+    start_timestamp: Optional[int] = None
+    end_timestamp: Optional[int] = None
+    limit: Optional[int] = 100
+    data_type: Optional[str] = None  # "video" or "transcription"
+
+async def retrieve_fluvio_data(room_id: str, req: FluvioDataRequest):
+    """Retrieve data from Fluvio based on filters"""
+    if fluvio_client is None:
+        print("Fluvio client not initialized, attempting to set up")
+        success = await setup_fluvio()
+        if not success:
+            return {"error": "Failed to set up Fluvio connection"}
+    
+    try:
+        # Create a consumer for the video feeds topic
+        consumer = fluvio_client.partition_consumer(fluvio_topic, 0)
         
-        # Store the quiz data in the room
-        room = rooms[room_id]
-        room.quiz_data = quiz_data
+        # Get all records
+        records = await consumer.fetch_records()
         
-        return {"message": "Test quiz generated successfully", "quiz_data": quiz_data}
+        # Filter and process the records
+        results = []
+        count = 0
+        
+        for record in records:
+            try:
+                # Parse the JSON data
+                data = json.loads(record.value_string())
+                metadata = data.get("metadata", {})
+                
+                # Filter by room_id
+                if metadata.get("room_id") != room_id:
+                    continue
+                
+                # Filter by timestamp if provided
+                timestamp = metadata.get("timestamp", 0)
+                if req.start_timestamp and timestamp < req.start_timestamp:
+                    continue
+                if req.end_timestamp and timestamp > req.end_timestamp:
+                    continue
+                
+                # Filter by data type if provided
+                if req.data_type and metadata.get("type") != req.data_type:
+                    continue
+                
+                # Add to results
+                results.append(data)
+                count += 1
+                
+                # Check limit
+                if req.limit and count >= req.limit:
+                    break
+                
+            except json.JSONDecodeError:
+                print(f"Error parsing record: {record.value_string()[:100]}...")
+                continue
+        
+        return {"data": results, "count": count}
+    
+    except Exception as e:
+        print(f"Error retrieving data from Fluvio: {str(e)}")
+        return {"error": f"Failed to retrieve data: {str(e)}"}
+
+@app.post("/rooms/{room_id}/video-data")
+async def get_room_video_data(room_id: str, req: FluvioDataRequest):
+    """Get video data for a specific room"""
+    # Set data type to video if not specified
+    if not req.data_type:
+        req.data_type = "video"
+    
+    data = await retrieve_fluvio_data(room_id, req)
+    return data
+
+@app.post("/rooms/{room_id}/transcriptions")
+async def get_room_transcriptions(room_id: str, req: FluvioDataRequest):
+    """Get transcriptions for a specific room"""
+    # Set data type to transcription if not specified
+    if not req.data_type:
+        req.data_type = "transcription"
+    
+    data = await retrieve_fluvio_data(room_id, req)
+    return data
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
